@@ -1,56 +1,57 @@
 export default {
-  async fetch(request) {
-    if (request.method !== 'POST') {
-      return new Response("Only POST requests are supported", { status: 405 });
-    }
+  async fetch(request, env) {
+    // Parse the input JSON array
+    const inputArr = await request.json();
+    const { bodyStr, nonce, pathSig } = inputArr[0];
 
-    try {
-      // Match the input fields from your JSON
-      const { bodyStr, nonce, pathSig } = await request.json();
+    // Your secrets
+    const API_KEY = env.KRAKEN_API_KEY;
+    const API_SECRET = env.KRAKEN_API_SECRET; // base64 encoded
 
-      // Combine into Kraken signature input
-      const sigInput = bodyStr + nonce + pathSig;
+    // Signature: sha256(bodyStr + nonce + pathSig), then HMAC-SHA512, then base64
+    const encoder = new TextEncoder();
+    const sigInput = bodyStr + nonce + pathSig;
 
-      // SHA256 hash of the full message
-      const sha256 = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(sigInput)
-      );
+    // 1. SHA256
+    const sha256 = await crypto.subtle.digest(
+      "SHA-256",
+      encoder.encode(sigInput)
+    );
 
-      // Secure secret loaded from Cloudflare environment secret
-      const base64Secret = globalThis.KRAKEN_API_SECRET_BASE64;
+    // 2. HMAC-SHA512
+    const key = await crypto.subtle.importKey(
+      "raw",
+      Uint8Array.from(atob(API_SECRET), c => c.charCodeAt(0)),
+      { name: "HMAC", hash: "SHA-512" },
+      false,
+      ["sign"]
+    );
+    const hmac = await crypto.subtle.sign("HMAC", key, sha256);
 
-      // Decode the base64 secret into binary
-      const rawSecret = Uint8Array.from(atob(base64Secret), c => c.charCodeAt(0));
+    // 3. Base64 encode
+    const signature = btoa(String.fromCharCode(...new Uint8Array(hmac)));
 
-      // Import HMAC key for SHA-512
-      const key = await crypto.subtle.importKey(
-        "raw",
-        rawSecret,
-        { name: "HMAC", hash: "SHA-512" },
-        false,
-        ["sign"]
-      );
+    // Prepare headers
+    const headers = {
+      "APIKey": API_KEY,
+      "Authent": signature,
+      "Nonce": nonce,
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
 
-      // Generate HMAC signature
-      const hmac = await crypto.subtle.sign("HMAC", key, sha256);
+    // Prepare endpoint
+    const endpoint = "https://futures.kraken.com/derivatives/api/v3/sendorder";
 
-      // Base64 encode the output
-      const signature = btoa(String.fromCharCode(...new Uint8Array(hmac)));
+    // Output JSON for n8n HTTP node
+    const output = {
+      url: endpoint,
+      method: "POST",
+      headers,
+      body: bodyStr
+    };
 
-      return new Response(
-        JSON.stringify({ signature }),
-        {
-          headers: { "Content-Type": "application/json" },
-          status: 200
-        }
-      );
-
-    } catch (err) {
-      return new Response(
-        JSON.stringify({ error: err.message }),
-        { status: 500 }
-      );
-    }
+    return new Response(JSON.stringify(output), {
+      headers: { "Content-Type": "application/json" }
+    });
   }
-};
+}
